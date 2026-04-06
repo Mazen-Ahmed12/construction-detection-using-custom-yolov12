@@ -1,8 +1,8 @@
 import { useRef, useState } from "react";
 
 export default function App() {
-  const [videoFrames, setVideoFrames] = useState([]);
-  const [events, setEvents] = useState([]);
+  const [frame, setFrame] = useState(null);
+  const [machines, setMachines] = useState({});
   const wsRef = useRef(null);
 
   const uploadVideo = async (e) => {
@@ -17,42 +17,59 @@ export default function App() {
       body: formData,
     });
 
-    // connect WebSocket
     if (!wsRef.current) {
       wsRef.current = new WebSocket("ws://localhost:8000/ws/video");
 
       wsRef.current.onmessage = (msg) => {
         const data = JSON.parse(msg.data);
-        setVideoFrames([data.frame]); // only latest frame
-        setEvents((prev) => [...prev.slice(-50), ...data.events]);
+        setFrame(data.frame);
+
+        const updated = { ...machines };
+
+        data.events.forEach((e) => {
+          updated[e.equipment_id] = e;
+        });
+
+        setMachines(updated);
       };
     }
   };
 
   return (
     <div className="p-4">
-      <h1 className="text-2xl font-bold mb-4">Real-time Video Detection</h1>
+      <h1 className="text-2xl font-bold mb-4">
+        Equipment Utilization Dashboard
+      </h1>
+
       <input type="file" onChange={uploadVideo} />
-      <div className="mt-4 flex gap-4">
+
+      <div className="flex gap-6 mt-4">
+        {/* Video */}
         <div>
-          {videoFrames.length > 0 && (
+          {frame && (
             <img
-              src={`data:image/jpeg;base64,${videoFrames[0]}`}
-              alt="frame"
+              src={`data:image/jpeg;base64,${frame}`}
               width="640"
-              height="360"
+              alt="video"
             />
           )}
         </div>
-        <div>
-          <h2 className="text-xl font-semibold">Detection Events</h2>
-          <ul className="max-h-[360px] overflow-auto border p-2">
-            {events.map((e, idx) => (
-              <li key={idx} className="border-b p-1">
-                Frame:{e.frame_id} | ID:{e.equipment_id} | Type:{e.equipment_type} | Activity:{e.activity}
-              </li>
-            ))}
-          </ul>
+
+        {/* Dashboard */}
+        <div className="w-96">
+          <h2 className="text-xl font-bold mb-2">Machines</h2>
+
+          {Object.values(machines).map((m) => (
+            <div key={m.equipment_id} className="border p-2 mb-2">
+              <p><b>ID:</b> {m.equipment_id}</p>
+              <p><b>Type:</b> {m.equipment_type}</p>
+              <p><b>State:</b> {m.state}</p>
+              <p><b>Activity:</b> {m.activity}</p>
+              <p><b>Working:</b> {m.working_time.toFixed(1)}s</p>
+              <p><b>Idle:</b> {m.idle_time.toFixed(1)}s</p>
+              <p><b>Utilization:</b> {m.utilization.toFixed(1)}%</p>
+            </div>
+          ))}
         </div>
       </div>
     </div>
