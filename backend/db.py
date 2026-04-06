@@ -4,7 +4,7 @@ conn = psycopg2.connect(
     dbname="eventsdb",
     user="myuser",
     password="mypass",
-    host="localhost",  # connect to Docker Postgres from local
+    host="localhost",
     port=5432,
 )
 cursor = conn.cursor()
@@ -15,34 +15,37 @@ def create_table():
         """
         CREATE TABLE IF NOT EXISTS equipment_events (
             id SERIAL PRIMARY KEY,
-            frame_id INT,
             equipment_id INT,
             equipment_type TEXT,
             timestamp TIMESTAMP,
             state TEXT,
             activity TEXT,
-            motion_source TEXT
+            working_time FLOAT,
+            idle_time FLOAT,
+            utilization FLOAT
         )
         """
     )
     conn.commit()
 
 
-def insert_event(event: dict):
+def insert_event(event):
     cursor.execute(
         """
         INSERT INTO equipment_events
-        (frame_id, equipment_id, equipment_type, timestamp, state, activity, motion_source)
-        VALUES (%s,%s,%s,%s,%s,%s,%s)
+        (equipment_id, equipment_type, timestamp, state, activity,
+         working_time, idle_time, utilization)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
         """,
         (
-            event["frame_id"],
             event["equipment_id"],
             event["equipment_type"],
             event["timestamp"],
             event["state"],
             event["activity"],
-            event["motion_source"],
+            event["working_time"],
+            event["idle_time"],
+            event["utilization"],
         ),
     )
     conn.commit()

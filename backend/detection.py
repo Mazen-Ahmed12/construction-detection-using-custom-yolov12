@@ -6,19 +6,118 @@ from ultralytics import YOLO
 from kafka_producer import send_event
 from db import insert_event
 from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 MODEL_PATH = "../best.pt"
-executor = ThreadPoolExecutor(max_workers=10)
 model = YOLO(MODEL_PATH)
 
+executor = ThreadPoolExecutor(max_workers=10)
 
+# =========================
+# MEMORY STORAGE
+# =========================
+prev_rois = {}
+state_memory = {}
+
+time_tracker = defaultdict(
+    lambda: {"last_seen": None, "working_time": 0, "idle_time": 0}
+)
+
+
+# =========================
+# ROI MOTION DETECTION
+# =========================
+def is_moving_roi(track_id, frame, box):
+    x1, y1, x2, y2 = box
+
+    # crop ROI
+    roi = frame[y1:y2, x1:x2]
+
+    if roi.size == 0:
+        return False
+
+    # grayscale + blur (reduce noise)
+    roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    roi_gray = cv2.GaussianBlur(roi_gray, (5, 5), 0)
+
+    if track_id not in prev_rois:
+        prev_rois[track_id] = roi_gray
+        return False
+
+    prev = prev_rois[track_id]
+
+    # resize to match previous ROI
+    roi_gray = cv2.resize(roi_gray, (prev.shape[1], prev.shape[0]))
+
+    # difference
+    diff = cv2.absdiff(prev, roi_gray)
+    _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+
+    motion_score = thresh.sum() / 255
+
+    prev_rois[track_id] = roi_gray
+
+    # 🔥 Tune this if needed
+    return motion_score > 500
+
+
+# =========================
+# STATE SMOOTHING
+# =========================
+def get_stable_state(track_id, moving):
+    if track_id not in state_memory:
+        state_memory[track_id] = {"count": 0, "state": "INACTIVE"}
+
+    mem = state_memory[track_id]
+
+    if moving:
+        mem["count"] += 1
+    else:
+        mem["count"] -= 1
+
+    # clamp range
+    mem["count"] = max(-5, min(5, mem["count"]))
+
+    # decision logic
+    if mem["count"] > 2:
+        state = "ACTIVE"
+    elif mem["count"] < -2:
+        state = "INACTIVE"
+    else:
+        state = mem["state"]
+
+    mem["state"] = state
+    return state
+
+
+# =========================
+# ACTIVITY CLASSIFICATION
+# =========================
+def classify_activity(state, class_name):
+    if state == "INACTIVE":
+        return "Waiting"
+
+    name = class_name.lower()
+
+    if "excavator" in name:
+        return "Digging"
+    elif "truck" in name:
+        return "Dumping"
+    elif "loader" in name:
+        return "Loading"
+
+    return "Moving"
+
+
+# =========================
+# MAIN DETECTION FUNCTION
+# =========================
 async def start_detection_for_video(video_path, clients):
-    """Process video, send frames+events to WebSocket clients and Kafka/Postgres"""
     import asyncio
 
     cap = cv2.VideoCapture(video_path)
-    frame_id = 0
 
     def process_event(event):
         send_event(event)
@@ -29,11 +128,10 @@ async def start_detection_for_video(video_path, clients):
         if not ret:
             break
 
-        frame_id += 1
-        timestamp = datetime.now().isoformat(timespec="milliseconds")
+        now = datetime.now()
+        events = []
 
         results = model.track(frame, persist=True)
-        events = []
 
         if results and results[0].boxes is not None:
             boxes = results[0].boxes.xyxy.int().cpu().numpy()
@@ -45,43 +143,84 @@ async def start_detection_for_video(video_path, clients):
                 class_name = model.names[c_id]
                 t_id = int(t_id)
 
-                # Draw bounding box on frame
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                # =========================
+                # NEW MOTION LOGIC
+                # =========================
+                moving = is_moving_roi(t_id, frame, box)
+                state = get_stable_state(t_id, moving)
+
+                # =========================
+                # ACTIVITY
+                # =========================
+                activity = classify_activity(state, class_name)
+
+                # =========================
+                # TIME TRACKING
+                # =========================
+                tracker = time_tracker[t_id]
+
+                if tracker["last_seen"]:
+                    delta = (now - tracker["last_seen"]).total_seconds()
+
+                    if state == "ACTIVE":
+                        tracker["working_time"] += delta
+                    else:
+                        tracker["idle_time"] += delta
+
+                tracker["last_seen"] = now
+
+                total = tracker["working_time"] + tracker["idle_time"]
+                utilization = (
+                    (tracker["working_time"] / total) * 100 if total > 0 else 0
+                )
+
+                # =========================
+                # DRAW UI
+                # =========================
+                color = (0, 255, 0) if state == "ACTIVE" else (0, 0, 255)
+
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(
                     frame,
-                    f"{class_name} ID:{t_id}",
+                    f"{class_name} ID:{t_id} {state}",
                     (x1, y1 - 10),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 0),
+                    0.5,
+                    color,
                     2,
                 )
 
+                # =========================
+                # EVENT
+                # =========================
                 event = {
-                    "frame_id": frame_id,
                     "equipment_id": t_id,
                     "equipment_type": class_name,
-                    "timestamp": timestamp,
-                    "state": "ACTIVE",
-                    "activity": "working",
-                    "motion_source": "global_motion",
+                    "timestamp": now.isoformat(),
+                    "state": state,
+                    "activity": activity,
+                    "working_time": tracker["working_time"],
+                    "idle_time": tracker["idle_time"],
+                    "utilization": utilization,
                 }
+
                 events.append(event)
                 executor.submit(process_event, event)
 
-        # encode frame to base64
+        # =========================
+        # SEND FRAME
+        # =========================
         _, buffer = cv2.imencode(".jpg", frame)
         frame_b64 = base64.b64encode(buffer).decode("utf-8")
 
-        # send to all WebSocket clients
         if clients:
-            frame_data = {"frame_id": frame_id, "frame": frame_b64, "events": events}
+            data = {"frame": frame_b64, "events": events}
             for ws in clients:
                 try:
-                    await ws.send_json(frame_data)
+                    await ws.send_json(data)
                 except:
                     pass
 
-        await asyncio.sleep(0.01)  # small delay to allow event loop
+        await asyncio.sleep(0.03)
 
     cap.release()
