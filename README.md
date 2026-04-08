@@ -6,6 +6,17 @@ Equipment Utilization & Activity Classification Prototype
 
 This project demonstrates a **real-time, microservices-based pipeline** for analyzing construction equipment utilization using **computer vision** and a **distributed backend architecture**. It tracks equipment states (ACTIVE/INACTIVE), classifies activities (Digging, Swinging/Loading, Dumping, Waiting), and calculates utilization metrics. Results are streamed via **Kafka** and displayed in a simple dashboard UI.
 
+🎥 Demo
+-------
+
+there is a short video showing the run and the output on the website:
+
+*   Video feed with bounding boxes
+    
+*   Dashboard updating in real-time
+
+[![Watch the demo](https://img.youtube.com/vi/CcxEmYGFRsQ/0.jpg)](https://youtu.be/CcxEmYGFRsQ)
+
 ⚙️ Features
 -----------
 
@@ -168,14 +179,3 @@ Trade-off: Kafka adds complexity but future-proofs the system for scaling to mul
   }
 }
 ```
-
-🎥 Demo
--------
-
-there is a short video showing the run and the output on the website:
-
-*   Video feed with bounding boxes
-    
-*   Dashboard updating in real-time
-
-  
